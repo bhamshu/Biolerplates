@@ -103,3 +103,14 @@ If needed, you can further use the `web_scraper.py` file to scrape the web page 
 - Use 'gpt-4o' as the model name for OpenAI's GPT-4 with vision capabilities
 
 # Scratchpad
+
+Current Task: Adding .gitignore to fix large file push error
+[X] Create .gitignore with Next.js specific rules
+[X] Add instructions to remove tracked node_modules
+[ ] Verify push succeeds after changes
+
+# Lessons
+
+- Large binary files (>100MB) should not be committed to GitHub repositories
+- node_modules should always be gitignored for Node.js/Next.js projects
+- Use package.json for dependency management instead of committing node_modules
