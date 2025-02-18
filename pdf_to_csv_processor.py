@@ -49,14 +49,20 @@ class GeminiProcessor:
         """Remove commas from numeric values and clean the data."""
         if isinstance(data, dict):
             for key, value in data.items():
-                if isinstance(value, str) and value.replace(',', '').replace('-', '').replace('.', '').isdigit():
-                    # Convert string numbers with commas to float/int
-                    data[key] = float(value.replace(',', ''))
+                if isinstance(value, str):
+                    # Remove commas and convert to float if it's a numeric string
+                    if value.replace(',', '').replace('-', '').replace('.', '').isdigit():
+                        # Convert string numbers with commas to float
+                        data[key] = float(value.replace(',', ''))
+                    elif value.strip() == '-' or value.strip() == '':
+                        # Handle empty or dash values
+                        data[key] = None
                 elif isinstance(value, (dict, list)):
                     self.clean_numeric_values(value)
         elif isinstance(data, list):
             for item in data:
-                self.clean_numeric_values(item)
+                if isinstance(item, (dict, list)):
+                    self.clean_numeric_values(item)
         return data
 
     def clean_management_discussion(self, data: Dict) -> Dict:
@@ -149,13 +155,123 @@ class GeminiProcessor:
                         }
                     ]
                 }
-                IMPORTANT: 
-                1. Return data for ALL quarters found in the text
-                2. Use null for missing numeric values
-                3. Remove commas from numbers
-                4. Each quarter's data should be a separate object in the rows array
+                IMPORTANT: Return data for ALL quarters found in the text. Use null for missing numeric values. Remove commas from numbers.
             """,
-            # ... similar array-based prompts for other tables ...
+            'balance_sheet': """
+                Extract ALL balance sheet data from the text in this exact JSON format:
+                {
+                    "rows": [
+                        {
+                            "balance_sheet_id": null,
+                            "company_id": null,
+                            "fiscal_period": "",
+                            "total_assets_cr": null,
+                            "total_liabilities_cr": null,
+                            "current_assets_cr": null,
+                            "cash_cr": null,
+                            "inventories_cr": null,
+                            "accounts_receivable_cr": null,
+                            "accounts_payable_cr": null,
+                            "long_term_debt_cr": null,
+                            "shareholder_equity_cr": null,
+                            "data_source": ""
+                        }
+                    ]
+                }
+                IMPORTANT: Return data for ALL periods found. Use null for missing numeric values. Remove commas from numbers.
+            """,
+            'financial_results': """
+                Extract ALL financial results data from the text in this exact JSON format:
+                {
+                    "rows": [
+                        {
+                            "financial_id": null,
+                            "company_id": null,
+                            "fiscal_period": "",
+                            "revenue_cr": null,
+                            "yoy_growth_revenue_pct": null,
+                            "ebitda_cr": null,
+                            "ebitda_margin_pct": null,
+                            "net_profit_cr": null,
+                            "net_profit_margin_pct": null,
+                            "eps_rs": null,
+                            "data_source": ""
+                        }
+                    ]
+                }
+                IMPORTANT: Return data for ALL periods found. Use null for missing numeric values. Remove commas from numbers.
+            """,
+            'cash_flow': """
+                Extract ALL cash flow data from the text in this exact JSON format:
+                {
+                    "rows": [
+                        {
+                            "cash_flow_id": null,
+                            "company_id": null,
+                            "fiscal_period": "",
+                            "net_cash_from_operations_cr": null,
+                            "net_cash_from_investing_cr": null,
+                            "net_cash_from_financing_cr": null,
+                            "capex_cr": null,
+                            "free_cash_flow_cr": null,
+                            "data_source": ""
+                        }
+                    ]
+                }
+                IMPORTANT: Return data for ALL periods found. Use null for missing numeric values. Remove commas from numbers.
+            """,
+            'key_ratios': """
+                Extract ALL key ratios data from the text in this exact JSON format:
+                {
+                    "rows": [
+                        {
+                            "ratio_id": null,
+                            "company_id": null,
+                            "fiscal_period": "",
+                            "pe_x": null,
+                            "pb_x": null,
+                            "ev_ebitda_x": null,
+                            "roe_pct": null,
+                            "roce_pct": null,
+                            "dividend_yield_pct": null,
+                            "data_source": ""
+                        }
+                    ]
+                }
+                IMPORTANT: Return data for ALL periods found. Use null for missing numeric values. Remove commas from numbers.
+            """,
+            'management_discussion': """
+                Extract ALL management discussion data from the text in this exact JSON format:
+                {
+                    "rows": [
+                        {
+                            "discussion_id": null,
+                            "company_id": null,
+                            "fiscal_period": "",
+                            "topic": "",
+                            "discussion_text": "",
+                            "data_source": ""
+                        }
+                    ]
+                }
+                IMPORTANT: Return data for ALL discussions found. Keep discussion_text concise but informative.
+            """,
+            'recommendations': """
+                Extract ALL recommendations data from the text in this exact JSON format:
+                {
+                    "rows": [
+                        {
+                            "recommendation_id": null,
+                            "company_id": null,
+                            "rating": "",
+                            "target_price_rs": null,
+                            "time_horizon_months": null,
+                            "data_source": ""
+                        }
+                    ]
+                }
+                IMPORTANT: Return data for ALL recommendations found. Use null for missing numeric values. Remove commas from numbers.
+            """
         }
         
         try:
@@ -168,6 +284,12 @@ class GeminiProcessor:
             
             try:
                 data = json.loads(response.text)
+                # Clean numeric values for each row
+                if "rows" in data:
+                    for row in data["rows"]:
+                        self.clean_numeric_values(row)
+                    return data["rows"]
+                return None
             except json.JSONDecodeError:
                 # Clean markdown formatting and try again
                 cleaned_text = response.text.strip()
@@ -183,7 +305,8 @@ class GeminiProcessor:
                     if "rows" in data:
                         for row in data["rows"]:
                             self.clean_numeric_values(row)
-                    return data["rows"]
+                        return data["rows"]
+                    return None
                 except json.JSONDecodeError as e:
                     print(f"Failed to parse JSON for {table_name} after cleaning: {str(e)}")
                     return None
@@ -442,6 +565,15 @@ class PDFProcessor:
     def process_table(self, pdf_path: str, table_name: str, pages: Optional[List[int]] = None) -> bool:
         """Process a single table from specified pages of a PDF."""
         try:
+            # Map old table names to new ones from schema
+            table_name_mapping = {
+                'outlook_or_management_discussion': 'management_discussion',
+                'recommendations_or_targets': 'recommendations'
+            }
+            
+            # Use mapped table name if it exists, otherwise use original
+            schema_table_name = table_name_mapping.get(table_name, table_name)
+            
             # Extract text from specified pages
             pdf_text = self.pdf_extractor.extract_text(pdf_path, pages)
             print(f"Extracted {len(pdf_text)} characters from PDF")
@@ -449,7 +581,7 @@ class PDFProcessor:
             filename = Path(pdf_path).name
             
             # Get data for this table
-            rows = self.gemini_processor.get_table_data(pdf_text, table_name, 'schemas.ddl')
+            rows = self.gemini_processor.get_table_data(pdf_text, schema_table_name, 'simplified_schema.ddl')
             
             if rows:
                 # Add source file and IDs to each row
@@ -466,18 +598,18 @@ class PDFProcessor:
                         'balance_sheet': 'balance_sheet_id',
                         'cash_flow': 'cash_flow_id',
                         'key_ratios': 'ratio_id',
-                        'outlook_or_management_discussion': 'discussion_id',
-                        'recommendations_or_targets': 'recommendation_id'
+                        'management_discussion': 'discussion_id',
+                        'recommendations': 'recommendation_id'
                     }
                     
-                    if table_name in id_fields and id_fields[table_name] in row:
-                        row[id_fields[table_name]] = hash(f"{filename}_{table_name}_{rows.index(row)}") % 10000
+                    if schema_table_name in id_fields and id_fields[schema_table_name] in row:
+                        row[id_fields[schema_table_name]] = hash(f"{filename}_{schema_table_name}_{rows.index(row)}") % 10000
                 
                 # Write to CSV
-                self.csv_writer.write_data({table_name: rows}, filename)
+                self.csv_writer.write_data({schema_table_name: rows}, filename)
                 return True
             else:
-                print(f"No data extracted for {table_name}")
+                print(f"No data extracted for {schema_table_name}")
                 return False
                 
         except Exception as e:
@@ -493,8 +625,8 @@ def main():
     # Process only shareholding_pattern table from first page
     success = processor.process_table(
         pdf_path=pdf_path,
-        table_name='shareholding_pattern',
-        pages=[0]  # Only process first page
+        table_name='balance_sheet',
+        # pages=[0]  # Only process first page
     )
     
     if success:
