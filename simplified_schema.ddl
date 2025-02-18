@@ -59,21 +59,40 @@ CREATE TABLE financial_results (
     data_source VARCHAR(255)
 );
 
--- Balance Sheet
 CREATE TABLE balance_sheet (
-    balance_sheet_id INT PRIMARY KEY,
-    company_id INT,
-    fiscal_period VARCHAR(20),
-    total_assets_cr DECIMAL(15,2),
-    total_liabilities_cr DECIMAL(15,2),
-    current_assets_cr DECIMAL(15,2),
-    cash_cr DECIMAL(15,2),
-    inventories_cr DECIMAL(15,2),
-    accounts_receivable_cr DECIMAL(15,2),
-    accounts_payable_cr DECIMAL(15,2),
-    long_term_debt_cr DECIMAL(15,2),
-    shareholder_equity_cr DECIMAL(15,2),
-    data_source VARCHAR(255)
+    balance_sheet_id          INT AUTO_INCREMENT PRIMARY KEY,
+    company_id                INT,
+    fiscal_period             VARCHAR(20),
+    
+    -- Existing columns
+    total_assets_cr           DECIMAL(18,2),
+    total_liabilities_cr      DECIMAL(18,2),
+    current_assets_cr         DECIMAL(18,2),
+    cash_cr                   DECIMAL(18,2),
+    inventories_cr            DECIMAL(18,2),
+    accounts_receivable_cr    DECIMAL(18,2),
+    accounts_payable_cr       DECIMAL(18,2),
+    long_term_debt_cr         DECIMAL(18,2),
+    shareholder_equity_cr     DECIMAL(18,2),
+    data_source               VARCHAR(100),
+    
+    -- Newly added columns from the screenshot
+    other_current_assets_cr   DECIMAL(18,2),
+    investments_cr            DECIMAL(18,2),
+    gross_fixed_assets_cr     DECIMAL(18,2),
+    net_fixed_assets_cr       DECIMAL(18,2),
+    cwip_cr                   DECIMAL(18,2),
+    intangible_assets_cr      DECIMAL(18,2),
+    def_tax_net_cr            DECIMAL(18,2),
+    other_assets_cr           DECIMAL(18,2),
+    current_liabilities_cr    DECIMAL(18,2),
+    provisions_cr             DECIMAL(18,2),
+    debt_funds_cr             DECIMAL(18,2),
+    other_liabilities_cr      DECIMAL(18,2),
+    equity_capital_cr         DECIMAL(18,2),
+    reserves_surplus_cr       DECIMAL(18,2),
+    shareholders_fund_cr      DECIMAL(18,2),
+    bvps                      DECIMAL(18,2)
 );
 
 -- Cash Flow

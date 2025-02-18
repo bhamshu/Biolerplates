@@ -6,6 +6,10 @@ import google.generativeai as genai
 from pathlib import Path
 import PyPDF2
 import json
+import time
+import fcntl
+import tempfile
+import shutil
 
 class ConfigManager:
     def __init__(self):
@@ -44,7 +48,31 @@ class PDFExtractor:
 class GeminiProcessor:
     def __init__(self, model):
         self.model = model
+        # Load schema once during initialization
+        self.table_schemas = self._load_table_schemas()
+
+    def _load_table_schemas(self) -> Dict[str, List[str]]:
+        """Load all table names and their columns from schema file."""
+        schemas = {}
+        current_table = None
+        columns = []
         
+        with open('simplified_schema.ddl', 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('CREATE TABLE'):
+                    current_table = line.split()[2].strip('(').strip()
+                    columns = []
+                elif line.startswith(')') and current_table:
+                    schemas[current_table] = columns
+                    current_table = None
+                elif current_table and line and not line.startswith(('--', 'PRIMARY', 'CONSTRAINT')):
+                    col_name = line.split()[0].strip(',')
+                    if col_name:
+                        columns.append(col_name)
+        
+        return schemas
+
     def clean_numeric_values(self, data: Dict) -> Dict:
         """Remove commas from numeric values and clean the data."""
         if isinstance(data, dict):
@@ -110,421 +138,199 @@ class GeminiProcessor:
         
         return data
     
-    def get_table_data(self, pdf_text: str, table_name: str, schema: str) -> Dict:
-        """Get data for a specific table using targeted prompts."""
-        
-        # Create a focused prompt for each table
-        prompts = {
-            'company_info': """
-                Extract ALL company information rows from the text in this exact JSON format:
-                {
-                    "rows": [
-                        {
-                            "company_id": null,
-                            "company_name": "",
-                            "bse_code": "",
-                            "nse_code": "",
-                            "bloomberg_code": "",
-                            "sector": "",
-                            "market_cap_cr": null,
-                            "enterprise_value_cr": null,
-                            "outstanding_shares_cr": null,
-                            "beta": null,
-                            "face_value_rs": null,
-                            "year_high_price_rs": null,
-                            "year_low_price_rs": null,
-                            "data_source": ""
-                        }
-                    ]
-                }
-                IMPORTANT: Use null for missing numeric values, not empty strings. Remove commas from numbers.
-            """,
-            'shareholding_pattern': """
-                Extract ALL shareholding pattern rows from the text in this exact JSON format:
-                {
-                    "rows": [
-                        {
-                            "company_id": null,
-                            "quarter": "",
-                            "promoter_holding_pct": null,
-                            "fii_holding_pct": null,
-                            "mf_insti_holding_pct": null,
-                            "public_holding_pct": null,
-                            "others_holding_pct": null,
-                            "data_source": ""
-                        }
-                    ]
-                }
-                IMPORTANT: Return data for ALL quarters found in the text. Use null for missing numeric values. Remove commas from numbers.
-            """,
-            'balance_sheet': """
-                Extract ALL balance sheet data from the text in this exact JSON format:
-                {
-                    "rows": [
-                        {
-                            "balance_sheet_id": null,
-                            "company_id": null,
-                            "fiscal_period": "",
-                            "total_assets_cr": null,
-                            "total_liabilities_cr": null,
-                            "current_assets_cr": null,
-                            "cash_cr": null,
-                            "inventories_cr": null,
-                            "accounts_receivable_cr": null,
-                            "accounts_payable_cr": null,
-                            "long_term_debt_cr": null,
-                            "shareholder_equity_cr": null,
-                            "data_source": ""
-                        }
-                    ]
-                }
-                IMPORTANT: Return data for ALL periods found. Use null for missing numeric values. Remove commas from numbers.
-            """,
-            'financial_results': """
-                Extract ALL financial results data from the text in this exact JSON format:
-                {
-                    "rows": [
-                        {
-                            "financial_id": null,
-                            "company_id": null,
-                            "fiscal_period": "",
-                            "revenue_cr": null,
-                            "yoy_growth_revenue_pct": null,
-                            "ebitda_cr": null,
-                            "ebitda_margin_pct": null,
-                            "net_profit_cr": null,
-                            "net_profit_margin_pct": null,
-                            "eps_rs": null,
-                            "data_source": ""
-                        }
-                    ]
-                }
-                IMPORTANT: Return data for ALL periods found. Use null for missing numeric values. Remove commas from numbers.
-            """,
-            'cash_flow': """
-                Extract ALL cash flow data from the text in this exact JSON format:
-                {
-                    "rows": [
-                        {
-                            "cash_flow_id": null,
-                            "company_id": null,
-                            "fiscal_period": "",
-                            "net_cash_from_operations_cr": null,
-                            "net_cash_from_investing_cr": null,
-                            "net_cash_from_financing_cr": null,
-                            "capex_cr": null,
-                            "free_cash_flow_cr": null,
-                            "data_source": ""
-                        }
-                    ]
-                }
-                IMPORTANT: Return data for ALL periods found. Use null for missing numeric values. Remove commas from numbers.
-            """,
-            'key_ratios': """
-                Extract ALL key ratios data from the text in this exact JSON format:
-                {
-                    "rows": [
-                        {
-                            "ratio_id": null,
-                            "company_id": null,
-                            "fiscal_period": "",
-                            "pe_x": null,
-                            "pb_x": null,
-                            "ev_ebitda_x": null,
-                            "roe_pct": null,
-                            "roce_pct": null,
-                            "dividend_yield_pct": null,
-                            "data_source": ""
-                        }
-                    ]
-                }
-                IMPORTANT: Return data for ALL periods found. Use null for missing numeric values. Remove commas from numbers.
-            """,
-            'management_discussion': """
-                Extract ALL management discussion data from the text in this exact JSON format:
-                {
-                    "rows": [
-                        {
-                            "discussion_id": null,
-                            "company_id": null,
-                            "fiscal_period": "",
-                            "topic": "",
-                            "discussion_text": "",
-                            "data_source": ""
-                        }
-                    ]
-                }
-                IMPORTANT: Return data for ALL discussions found. Keep discussion_text concise but informative.
-            """,
-            'recommendations': """
-                Extract ALL recommendations data from the text in this exact JSON format:
-                {
-                    "rows": [
-                        {
-                            "recommendation_id": null,
-                            "company_id": null,
-                            "rating": "",
-                            "target_price_rs": null,
-                            "time_horizon_months": null,
-                            "data_source": ""
-                        }
-                    ]
-                }
-                IMPORTANT: Return data for ALL recommendations found. Use null for missing numeric values. Remove commas from numbers.
-            """
+    def parse_schema_to_json(self, schema_file: str, table_name: str) -> dict:
+        """Convert DDL schema to JSON schema for structured output."""
+        # Use string type definitions instead of tuples/lists
+        type_mapping = {
+            'INT': {'type': 'number'},
+            'DECIMAL': {'type': 'number'},
+            'VARCHAR': {'type': 'string'},
+            'TEXT': {'type': 'string'}
         }
         
-        try:
-            prompt = prompts.get(table_name, "")
-            if not prompt:
-                raise ValueError(f"No prompt defined for table {table_name}")
+        # Define schema for structured output using plain dictionaries
+        schema = {
+            'type': 'object',
+            'properties': {
+                'rows': {
+                    'type': 'array',
+                    'items': {
+                        'type': 'object',
+                        'properties': {},
+                        'required': ['data_source']
+                    }
+                }
+            }
+        }
+        
+        # Parse DDL file to build schema
+        current_table = None
+        required_fields = set(['data_source'])  # Use set for required fields
+        
+        with open(schema_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('CREATE TABLE'):
+                    current_table = line.split()[2].strip('(').strip()
+                elif current_table == table_name and line and not line.startswith(('--', 'PRIMARY', 'CONSTRAINT', ')')):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        col_name = parts[0].strip(',')
+                        col_type = parts[1].split('(')[0].upper()
+                        
+                        # Get type definition from mapping
+                        type_def = type_mapping.get(col_type, {'type': 'string'})
+                        schema['properties']['rows']['items']['properties'][col_name] = type_def.copy()
+                        
+                        if 'NOT NULL' in line.upper():
+                            required_fields.add(col_name)
                 
-            response = self.model.generate_content(prompt + "\n\nExtract from this text:\n" + pdf_text)
-            print(f"Raw Gemini response for {table_name}:", response.text)
+                elif line.startswith(')') and current_table == table_name:
+                    break
+        
+        # Convert set to list for JSON serialization
+        schema['properties']['rows']['items']['required'] = list(required_fields)
+        
+        return schema
+
+    def get_table_data(self, pdf_text: str, table_name: str, schema_file: str) -> Optional[List[Dict]]:
+        """Get data for a specific table using structured outputs."""
+        try:
+            if table_name not in self.table_schemas:
+                print(f"Unknown table: {table_name}")
+                return None
+
+            # Generate schema for the specific table
+            schema = {
+                'type': 'object',
+                'properties': {
+                    'rows': {
+                        'type': 'array',
+                        'items': {
+                            'type': 'object',
+                            'properties': {
+                                col: {'type': 'string'} for col in self.table_schemas[table_name]
+                            },
+                            'required': ['data_source']
+                        }
+                    }
+                }
+            }
             
+            # Configure generation with structured output and low temperature
+            generation_config = {
+                "temperature": 0.1,
+                "response_schema": schema
+            }
+            
+            prompt = f"""
+            Extract ALL the following information from the given text into structured data.
+            IMPORTANT: 
+            1. Do NOT use commas in numeric values
+            2. All numeric values should be plain numbers without formatting
+            3. Use null for missing values, not empty strings for numeric fields
+            4. Extract data for table: {table_name}
+            5. Return data in the exact format specified by the schema
+            """
+            
+            # Get response directly
+            response = self.model.generate_content(
+                prompt + "\n\nExtract from this text:\n" + pdf_text,
+                generation_config=generation_config
+            )
+            
+            if not response or not response.text:
+                print(f"No response received for {table_name}")
+                return None
+
+            # Parse response text as JSON
             try:
                 data = json.loads(response.text)
-                # Clean numeric values for each row
-                if "rows" in data:
-                    for row in data["rows"]:
-                        self.clean_numeric_values(row)
-                    return data["rows"]
-                return None
             except json.JSONDecodeError:
-                # Clean markdown formatting and try again
-                cleaned_text = response.text.strip()
-                if cleaned_text.startswith('```'):
-                    # Remove opening and closing code block markers
-                    cleaned_text = cleaned_text.split('```')[1]
-                    if cleaned_text.lower().startswith('json'):
-                        cleaned_text = cleaned_text[4:]  # Remove 'json' if present
-                    cleaned_text = cleaned_text.strip()
-                try:
-                    data = json.loads(cleaned_text)
-                    # Clean numeric values for each row
-                    if "rows" in data:
-                        for row in data["rows"]:
-                            self.clean_numeric_values(row)
-                        return data["rows"]
-                    return None
-                except json.JSONDecodeError as e:
-                    print(f"Failed to parse JSON for {table_name} after cleaning: {str(e)}")
+                print(f"Invalid JSON response for {table_name}: {response.text}")
+                return None
+
+            # Validate and extract rows
+            if isinstance(data, dict) and "rows" in data:
+                rows = data["rows"]
+                if not isinstance(rows, list):
+                    print(f"Rows is not a list for {table_name}")
                     return None
                 
+                # Clean numeric values for each row
+                for row in rows:
+                    if not isinstance(row, dict):
+                        print(f"Row is not a dictionary for {table_name}")
+                        continue
+                    self.clean_numeric_values(row)
+                return rows
+            
+            print(f"No rows found in response for {table_name}")
+            return None
+            
         except Exception as e:
             print(f"Error getting data for {table_name}: {str(e)}")
             return None
 
     def get_structured_data(self, pdf_text: str) -> Dict:
-        prompt = """
-        Extract ALL the following information from the given text and return it in this EXACT JSON format.
-        IMPORTANT: 
-        1. Do NOT use commas in numeric values
-        2. Return only ONE discussion_text in management_discussion
-        3. All numeric values should be plain numbers without formatting
-        4. Use null for missing values, not empty strings for numeric fields
-        
-        {
-            "company_info": {
-                "company_id": null,
-                "company_name": "",
-                "bse_code": "",
-                "nse_code": "",
-                "bloomberg_code": "",
-                "sector": "",
-                "market_cap_cr": null,
-                "enterprise_value_cr": null,
-                "outstanding_shares_cr": null,
-                "beta": null,
-                "face_value_rs": null,
-                "year_high_price_rs": null,
-                "year_low_price_rs": null,
-                "data_source": ""
-            },
-            "shareholding": {
-                "company_id": null,
-                "quarter": "",
-                "promoter_holding_pct": null,
-                "fii_holding_pct": null,
-                "mf_insti_holding_pct": null,
-                "public_holding_pct": null,
-                "others_holding_pct": null,
-                "data_source": ""
-            },
-            "price_performance": {
-                "company_id": null,
-                "period": "",
-                "absolute_return_3m_pct": null,
-                "absolute_return_6m_pct": null,
-                "absolute_return_1y_pct": null,
-                "sensex_return_3m_pct": null,
-                "sensex_return_6m_pct": null,
-                "sensex_return_1y_pct": null,
-                "relative_return_3m_pct": null,
-                "relative_return_6m_pct": null,
-                "relative_return_1y_pct": null,
-                "data_source": ""
-            },
-            "financial_results": {
-                "financial_id": null,
-                "company_id": null,
-                "fiscal_period": "",
-                "revenue_cr": null,
-                "yoy_growth_revenue_pct": null,
-                "ebitda_cr": null,
-                "ebitda_margin_pct": null,
-                "net_profit_cr": null,
-                "net_profit_margin_pct": null,
-                "eps_rs": null,
-                "data_source": ""
-            },
-            "balance_sheet": {
-                "balance_sheet_id": null,
-                "company_id": null,
-                "fiscal_period": "",
-                "total_assets_cr": null,
-                "total_liabilities_cr": null,
-                "current_assets_cr": null,
-                "cash_cr": null,
-                "inventories_cr": null,
-                "accounts_receivable_cr": null,
-                "accounts_payable_cr": null,
-                "long_term_debt_cr": null,
-                "shareholder_equity_cr": null,
-                "data_source": ""
-            },
-            "cash_flow": {
-                "cash_flow_id": null,
-                "company_id": null,
-                "fiscal_period": "",
-                "net_cash_from_operations_cr": null,
-                "net_cash_from_investing_cr": null,
-                "net_cash_from_financing_cr": null,
-                "capex_cr": null,
-                "free_cash_flow_cr": null,
-                "data_source": ""
-            },
-            "key_ratios": {
-                "ratio_id": null,
-                "company_id": null,
-                "fiscal_period": "",
-                "pe_x": null,
-                "pb_x": null,
-                "ev_ebitda_x": null,
-                "roe_pct": null,
-                "roce_pct": null,
-                "dividend_yield_pct": null,
-                "data_source": ""
-            },
-            "management_discussion": {
-                "discussion_id": null,
-                "company_id": null,
-                "fiscal_period": "",
-                "topic": "",
-                "discussion_text": "",
-                "data_source": ""
-            },
-            "recommendations": {
-                "recommendation_id": null,
-                "company_id": null,
-                "rating": "",
-                "target_price_rs": null,
-                "time_horizon_months": null,
-                "data_source": ""
-            }
-        }
-        """
-        
+        """Extract all structured data from PDF text using table schemas."""
         try:
-            response = self.model.generate_content(prompt + "\n\nExtract data from this text:\n" + pdf_text)
-            print("Raw Gemini response:", response.text)
+            # Get list of tables from loaded schema
+            tables = list(self.table_schemas.keys())
             
-            try:
-                # First try direct JSON parsing
-                data = json.loads(response.text)
-            except json.JSONDecodeError:
-                # If that fails, try to clean the response and parse again
-                cleaned_response = response.text.replace('\n                "discussion_text":', '"temp":')
-                try:
-                    data = json.loads(cleaned_response)
-                except json.JSONDecodeError:
-                    # If still fails, try to find JSON-like structure
-                    import re
-                    json_match = re.search(r'\{.*\}', response.text, re.DOTALL)
-                    if json_match:
-                        data = json.loads(json_match.group())
+            # Extract data for each table
+            all_data = {}
+            for table_name in tables:
+                table_data = self.get_table_data(pdf_text, table_name, 'simplified_schema.ddl')
+                if table_data:
+                    # For single row tables, use first row
+                    if table_name in ['company_info', 'shareholding_pattern', 'price_performance']:
+                        all_data[table_name] = table_data[0] if table_data else {}
                     else:
-                        raise Exception("No JSON structure found in response")
-            
+                        all_data[table_name] = table_data
+
             # Clean and normalize the data
-            data = self.clean_numeric_values(data)
-            data = self.clean_management_discussion(data)
-            data = self.normalize_field_names(data)
+            all_data = self.clean_numeric_values(all_data)
+            all_data = self.clean_management_discussion(all_data)
+            all_data = self.normalize_field_names(all_data)
             
-            return data
+            return all_data
+
         except Exception as e:
-            print(f"Error processing response: {str(e)}")
-            print(f"Full response text: {response.text}")
-            
-            # Return empty structure if parsing fails
-            return self.get_empty_structure()
+            print(f"Error processing structured data: {str(e)}")
+            return {}
 
     def get_empty_structure(self) -> Dict:
         """Return empty data structure with all required fields."""
-        return {
-            "company_info": {
-                "company_id": None,
-                "company_name": "",
-                "bse_code": "",
-                "nse_code": "",
-                "bloomberg_code": "",
-                "sector": "",
-                "market_cap_cr": None,
-                "enterprise_value_cr": None,
-                "outstanding_shares_cr": None,
-                "beta": None,
-                "face_value_rs": None,
-                "year_high_price_rs": None,
-                "year_low_price_rs": None,
-                "data_source": ""
-            },
-            "shareholding": {
-                "company_id": None,
-                "quarter": "",
-                "promoter_holding_pct": None,
-                "fii_holding_pct": None,
-                "mf_insti_holding_pct": None,
-                "public_holding_pct": None,
-                "others_holding_pct": None,
-                "data_source": ""
-            }
-        }
+        raise NotImplementedError("Use schema from simplified_schema.ddl instead")
 
 class CSVWriter:
     def __init__(self, output_dir: Path):
         self.output_dir = output_dir
-        # Load table configurations from schema
+        # Change schema file path
         self.table_configs = self._load_schema_configs()
         
     def _load_schema_configs(self) -> Dict:
-        """Load table configurations from schema.ddl"""
+        """Load table configurations from simplified_schema.ddl"""
         configs = {}
         current_table = None
         columns = []
         
-        with open('schemas.ddl', 'r') as f:
+        with open('simplified_schema.ddl', 'r') as f:  # Changed from schemas.ddl
             for line in f:
                 line = line.strip()
                 if line.startswith('CREATE TABLE'):
-                    current_table = line.split()[2].strip('(')
+                    # Extract table name without any trailing characters
+                    current_table = line.split()[2].strip('(').strip()
                     columns = []
                 elif line.startswith(')') and current_table:
                     filename = f"{current_table}.csv"
                     configs[current_table] = (filename, columns)
                     current_table = None
-                elif current_table and line and not line.startswith('--'):
+                elif current_table and line and not line.startswith(('--', 'PRIMARY', 'CONSTRAINT')):
+                    # Extract just the column name before any type definition
                     col_name = line.split()[0].strip(',')
-                    if col_name and not col_name.startswith(('PRIMARY', 'CONSTRAINT')):
+                    if col_name:
                         columns.append(col_name)
                         
         return configs
@@ -541,19 +347,38 @@ class CSVWriter:
                     continue
 
     def _write_csv(self, filepath: Path, headers: List[str], data: List[Dict]):
-        """Write data to CSV file."""
-        file_exists = filepath.exists()
-        mode = 'a' if file_exists else 'w'
-        with open(filepath, mode, newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=headers)
+        """Write data to CSV file with file locking for thread safety."""
+        # Create a temporary file
+        temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, newline='')
+        
+        try:
+            writer = csv.DictWriter(temp_file, fieldnames=headers)
+            
+            # If target file doesn't exist, write header
+            file_exists = filepath.exists()
             if not file_exists:
                 writer.writeheader()
-            # Handle both single dict and list of dicts
+            
+            # Copy existing content if file exists
+            if file_exists:
+                with open(filepath, 'r', newline='') as existing_file:
+                    shutil.copyfileobj(existing_file, temp_file)
+            
+            # Write new data
             rows = data if isinstance(data, list) else [data]
             for row in rows:
-                # Filter out any extra fields not in headers
                 row_data = {k: v for k, v in row.items() if k in headers}
                 writer.writerow(row_data)
+                
+            temp_file.close()
+            
+            # Atomically replace the target file
+            shutil.move(temp_file.name, filepath)
+            
+        except Exception as e:
+            # Clean up temp file in case of error
+            os.unlink(temp_file.name)
+            raise e
 
 class PDFProcessor:
     def __init__(self):
@@ -562,21 +387,24 @@ class PDFProcessor:
         self.gemini_processor = GeminiProcessor(self.config.model)
         self.csv_writer = CSVWriter(self.config.OUTPUT_DIR)
         
-    def process_table(self, pdf_path: str, table_name: str, pages: Optional[List[int]] = None) -> bool:
+    def process_table(self, pdf_path: str, table_name: str, pages: Optional[List[int]] = None, pdf_text: Optional[str] = None) -> bool:
         """Process a single table from specified pages of a PDF."""
         try:
-            # Map old table names to new ones from schema
+            # Updated table name mapping to match schema
             table_name_mapping = {
                 'outlook_or_management_discussion': 'management_discussion',
-                'recommendations_or_targets': 'recommendations'
+                'recommendations_or_targets': 'recommendations',
+                'shareholding': 'shareholding_pattern',  # Added mapping
+                'price_perf': 'price_performance',      # Added mapping
+                'financials': 'financial_results'       # Added mapping
             }
             
-            # Use mapped table name if it exists, otherwise use original
             schema_table_name = table_name_mapping.get(table_name, table_name)
             
-            # Extract text from specified pages
-            pdf_text = self.pdf_extractor.extract_text(pdf_path, pages)
-            print(f"Extracted {len(pdf_text)} characters from PDF")
+            # Use provided PDF text or extract if not provided
+            if pdf_text is None:
+                pdf_text = self.pdf_extractor.extract_text(pdf_path, pages)
+                print(f"Extracted {len(pdf_text)} characters from PDF")
             
             filename = Path(pdf_path).name
             
@@ -616,23 +444,39 @@ class PDFProcessor:
             print(f"Error processing table {table_name} from PDF {pdf_path}: {str(e)}")
             return False
 
+    def process_all_tables(self, pdf_path: str, pages: Optional[List[int]] = None) -> Dict[str, bool]:
+        """Process all tables from a PDF."""
+        # Get tables from schema
+        tables = list(self.gemini_processor.table_schemas.keys())
+        
+        results = {}
+        # Extract text once for all tables
+        pdf_text = self.pdf_extractor.extract_text(pdf_path, pages)
+        print(f"Extracted {len(pdf_text)} characters from PDF")
+        
+        for table_name in tables:
+            try:
+                success = self.process_table(
+                    pdf_path=pdf_path,
+                    table_name=table_name,
+                    pages=pages,
+                    pdf_text=pdf_text
+                )
+                results[table_name] = success
+            except Exception as e:
+                print(f"Error processing {table_name}: {str(e)}")
+                results[table_name] = False
+                
+        return results
+
 def main():
     processor = PDFProcessor()
-    
-    # Process single PDF, only first page, only shareholding pattern
     pdf_path = "/home/orwell/Desktop/gigaml/FRD Latest Report Updates/SP20241006120459650BATA.pdf"
     
-    # Process only shareholding_pattern table from first page
-    success = processor.process_table(
-        pdf_path=pdf_path,
-        table_name='balance_sheet',
-        # pages=[0]  # Only process first page
-    )
+    results = processor.process_all_tables(pdf_path)
     
-    if success:
-        print(f"Successfully processed shareholding pattern from {pdf_path}")
-    else:
-        print(f"Failed to process shareholding pattern from {pdf_path}")
+    for table, success in results.items():
+        print(f"{table}: {'Success' if success else 'Failed'}")
 
 if __name__ == "__main__":
     main() 
