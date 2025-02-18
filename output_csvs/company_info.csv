@@ -1,0 +1,4 @@
+company_id,company_name,bse_code,nse_code,bloomberg_code,sector,market_cap_cr,enterprise_value_cr,outstanding_shares_cr,beta,face_value_rs,year_high_price_rs,year_low_price_rs,data_source
+1640,Bata India Ltd.,500043,BATAINDIA,BATA:IN,FMCG,18842,19564,12.9,0.9,552,1770,1269,SP20241006120459650BATA.pdf
+6457,Bata India Ltd. (BIL),500043,BATAINDIA,BATA:IN,FMCG,"18,842","19,564",12.9,0.9,552,"1,770","1,269",SP20241006120459650BATA.pdf
+4561,Bata India  Ltd.,500043.0,BATAINDIA,BATA :IN,FMCG,18842,19564,12.9,0.9,552,1770,1269,SP20241006120459650BATA.pdf

@@ -1,0 +1,2 @@
+company_id,company_name,bse_code,nse_code,bloomberg_code,sector,market_cap_cr,enterprise_value_cr,outstanding_shares_cr,beta,face_value_rs,year_high_price_rs,year_low_price_rs,data_source
+CU-12345678,City Union Bank Ltd,532210,CUB,CUBK:IN,Banking,12306.3,12400.5,74.1,1.4,1.0,167.7,119.5,SP20242006180751803CUB.pdf

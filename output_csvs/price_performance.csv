@@ -1,0 +1,2 @@
+company_id,period,absolute_return_3m_pct,absolute_return_6m_pct,absolute_return_1y_pct,sensex_return_3m_pct,sensex_return_6m_pct,sensex_return_1y_pct,relative_return_3m_pct,relative_return_6m_pct,relative_return_1y_pct,data_source
+,3 Month,0.9,-12.1,-7.5,3.4,9.7,21.9,-2.5,-21.9,-29.4,
