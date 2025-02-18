@@ -22,13 +22,21 @@ class ConfigManager:
 
 class PDFExtractor:
     @staticmethod
-    def extract_text(pdf_path: str) -> str:
+    def extract_text(pdf_path: str, pages: Optional[List[int]] = None) -> str:
+        """
+        Extract text from specified pages of PDF. If pages is None, extracts all pages.
+        """
         try:
             with open(pdf_path, 'rb') as file:
                 reader = PyPDF2.PdfReader(file)
                 text = ""
-                for page in reader.pages:
-                    text += page.extract_text() + "\n"
+                
+                # If pages not specified, process all pages
+                pages_to_process = pages if pages is not None else range(len(reader.pages))
+                
+                for page_num in pages_to_process:
+                    if page_num < len(reader.pages):
+                        text += reader.pages[page_num].extract_text() + "\n"
                 return text
         except Exception as e:
             raise Exception(f"Error extracting text from PDF: {str(e)}")
@@ -102,40 +110,52 @@ class GeminiProcessor:
         # Create a focused prompt for each table
         prompts = {
             'company_info': """
-                Extract ONLY company information from the text in this exact JSON format:
+                Extract ALL company information rows from the text in this exact JSON format:
                 {
-                    "company_id": null,
-                    "company_name": "",
-                    "bse_code": "",
-                    "nse_code": "",
-                    "bloomberg_code": "",
-                    "sector": "",
-                    "market_cap_cr": null,
-                    "enterprise_value_cr": null,
-                    "outstanding_shares_cr": null,
-                    "beta": null,
-                    "face_value_rs": null,
-                    "year_high_price_rs": null,
-                    "year_low_price_rs": null,
-                    "data_source": ""
+                    "rows": [
+                        {
+                            "company_id": null,
+                            "company_name": "",
+                            "bse_code": "",
+                            "nse_code": "",
+                            "bloomberg_code": "",
+                            "sector": "",
+                            "market_cap_cr": null,
+                            "enterprise_value_cr": null,
+                            "outstanding_shares_cr": null,
+                            "beta": null,
+                            "face_value_rs": null,
+                            "year_high_price_rs": null,
+                            "year_low_price_rs": null,
+                            "data_source": ""
+                        }
+                    ]
                 }
                 IMPORTANT: Use null for missing numeric values, not empty strings. Remove commas from numbers.
             """,
             'shareholding_pattern': """
-                Extract ONLY shareholding pattern data from the text in this exact JSON format:
+                Extract ALL shareholding pattern rows from the text in this exact JSON format:
                 {
-                    "company_id": null,
-                    "quarter": "",
-                    "promoter_holding_pct": null,
-                    "fii_holding_pct": null,
-                    "mf_insti_holding_pct": null,
-                    "public_holding_pct": null,
-                    "others_holding_pct": null,
-                    "data_source": ""
+                    "rows": [
+                        {
+                            "company_id": null,
+                            "quarter": "",
+                            "promoter_holding_pct": null,
+                            "fii_holding_pct": null,
+                            "mf_insti_holding_pct": null,
+                            "public_holding_pct": null,
+                            "others_holding_pct": null,
+                            "data_source": ""
+                        }
+                    ]
                 }
-                IMPORTANT: Use null for missing numeric values. Remove commas from numbers.
+                IMPORTANT: 
+                1. Return data for ALL quarters found in the text
+                2. Use null for missing numeric values
+                3. Remove commas from numbers
+                4. Each quarter's data should be a separate object in the rows array
             """,
-            # ... similar prompts for other tables ...
+            # ... similar array-based prompts for other tables ...
         }
         
         try:
@@ -148,10 +168,25 @@ class GeminiProcessor:
             
             try:
                 data = json.loads(response.text)
-                return self.clean_numeric_values(data)
             except json.JSONDecodeError:
-                print(f"Failed to parse JSON for {table_name}")
-                return None
+                # Clean markdown formatting and try again
+                cleaned_text = response.text.strip()
+                if cleaned_text.startswith('```'):
+                    # Remove opening and closing code block markers
+                    cleaned_text = cleaned_text.split('```')[1]
+                    if cleaned_text.lower().startswith('json'):
+                        cleaned_text = cleaned_text[4:]  # Remove 'json' if present
+                    cleaned_text = cleaned_text.strip()
+                try:
+                    data = json.loads(cleaned_text)
+                    # Clean numeric values for each row
+                    if "rows" in data:
+                        for row in data["rows"]:
+                            self.clean_numeric_values(row)
+                    return data["rows"]
+                except json.JSONDecodeError as e:
+                    print(f"Failed to parse JSON for {table_name} after cleaning: {str(e)}")
+                    return None
                 
         except Exception as e:
             print(f"Error getting data for {table_name}: {str(e)}")
@@ -382,7 +417,7 @@ class CSVWriter:
                     print(f"Error writing {table_name} to CSV: {str(e)}")
                     continue
 
-    def _write_csv(self, filepath: Path, headers: List[str], data: Dict):
+    def _write_csv(self, filepath: Path, headers: List[str], data: List[Dict]):
         """Write data to CSV file."""
         file_exists = filepath.exists()
         mode = 'a' if file_exists else 'w'
@@ -390,9 +425,12 @@ class CSVWriter:
             writer = csv.DictWriter(f, fieldnames=headers)
             if not file_exists:
                 writer.writeheader()
-            # Filter out any extra fields not in headers
-            row_data = {k: v for k, v in data.items() if k in headers}
-            writer.writerow(row_data)
+            # Handle both single dict and list of dicts
+            rows = data if isinstance(data, list) else [data]
+            for row in rows:
+                # Filter out any extra fields not in headers
+                row_data = {k: v for k, v in row.items() if k in headers}
+                writer.writerow(row_data)
 
 class PDFProcessor:
     def __init__(self):
@@ -401,27 +439,27 @@ class PDFProcessor:
         self.gemini_processor = GeminiProcessor(self.config.model)
         self.csv_writer = CSVWriter(self.config.OUTPUT_DIR)
         
-    def process_pdf(self, pdf_path: str):
+    def process_table(self, pdf_path: str, table_name: str, pages: Optional[List[int]] = None) -> bool:
+        """Process a single table from specified pages of a PDF."""
         try:
-            pdf_text = self.pdf_extractor.extract_text(pdf_path)
+            # Extract text from specified pages
+            pdf_text = self.pdf_extractor.extract_text(pdf_path, pages)
             print(f"Extracted {len(pdf_text)} characters from PDF")
             
             filename = Path(pdf_path).name
-            success = True
             
-            # Process each table separately
-            for table_name in self.csv_writer.table_configs.keys():
-                print(f"Processing {table_name}...")
+            # Get data for this table
+            rows = self.gemini_processor.get_table_data(pdf_text, table_name, 'schemas.ddl')
+            
+            if rows:
+                # Add source file and IDs to each row
+                company_id = hash(filename) % 10000
                 
-                # Get data for this table
-                table_data = self.gemini_processor.get_table_data(pdf_text, table_name, 'schemas.ddl')
-                
-                if table_data:
-                    # Add source file and IDs
-                    table_data['data_source'] = filename
-                    if 'company_id' in table_data and not table_data['company_id']:
-                        table_data['company_id'] = hash(filename) % 10000
-                        
+                for row in rows:
+                    row['data_source'] = filename
+                    if 'company_id' in row and not row['company_id']:
+                        row['company_id'] = company_id
+                    
                     # Add specific IDs for tables that need them
                     id_fields = {
                         'financial_results': 'financial_id',
@@ -432,32 +470,37 @@ class PDFProcessor:
                         'recommendations_or_targets': 'recommendation_id'
                     }
                     
-                    if table_name in id_fields and id_fields[table_name] in table_data:
-                        table_data[id_fields[table_name]] = hash(f"{filename}_{table_name}") % 10000
-                    
-                    # Write to CSV
-                    self.csv_writer.write_data({table_name: table_data}, filename)
-                else:
-                    print(f"No data extracted for {table_name}")
-                    success = False
-                    
-            return success
-            
+                    if table_name in id_fields and id_fields[table_name] in row:
+                        row[id_fields[table_name]] = hash(f"{filename}_{table_name}_{rows.index(row)}") % 10000
+                
+                # Write to CSV
+                self.csv_writer.write_data({table_name: rows}, filename)
+                return True
+            else:
+                print(f"No data extracted for {table_name}")
+                return False
+                
         except Exception as e:
-            print(f"Error processing PDF {pdf_path}: {str(e)}")
+            print(f"Error processing table {table_name} from PDF {pdf_path}: {str(e)}")
             return False
 
 def main():
     processor = PDFProcessor()
     
-    # Process single PDF
+    # Process single PDF, only first page, only shareholding pattern
     pdf_path = "/home/orwell/Desktop/gigaml/FRD Latest Report Updates/SP20241006120459650BATA.pdf"
-    success = processor.process_pdf(pdf_path)
+    
+    # Process only shareholding_pattern table from first page
+    success = processor.process_table(
+        pdf_path=pdf_path,
+        table_name='shareholding_pattern',
+        pages=[0]  # Only process first page
+    )
     
     if success:
-        print(f"Successfully processed {pdf_path}")
+        print(f"Successfully processed shareholding pattern from {pdf_path}")
     else:
-        print(f"Failed to process {pdf_path}")
+        print(f"Failed to process shareholding pattern from {pdf_path}")
 
 if __name__ == "__main__":
     main() 
