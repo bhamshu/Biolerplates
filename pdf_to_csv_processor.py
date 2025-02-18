@@ -217,7 +217,6 @@ class GeminiProcessor:
                 }
             }
             
-            # Configure generation with structured output and low temperature
             generation_config = {
                 "temperature": 0.1,
                 "response_schema": schema
@@ -226,14 +225,13 @@ class GeminiProcessor:
             prompt = f"""
             Extract ALL the following information from the given text into structured data.
             IMPORTANT: 
-            1. Do NOT use commas in numeric values
+            1. DO NOT use commas in numeric values
             2. All numeric values should be plain numbers without formatting
             3. Use null for missing values, not empty strings for numeric fields
             4. Extract data for table: {table_name}
             5. Return data in the exact format specified by the schema
             """
             
-            # Get response directly
             response = self.model.generate_content(
                 prompt + "\n\nExtract from this text:\n" + pdf_text,
                 generation_config=generation_config
@@ -243,11 +241,32 @@ class GeminiProcessor:
                 print(f"No response received for {table_name}")
                 return None
 
-            # Parse response text as JSON
-            try:
-                data = json.loads(response.text)
-            except json.JSONDecodeError:
-                print(f"Invalid JSON response for {table_name}: {response.text}")
+            print(f"\n=== Raw Response for {table_name} ===")
+            print(response.text)
+
+            # Clean the response text and initialize data
+            cleaned_response = response.text.strip('`').strip()
+            data = None
+            
+            print(f"\n=== Cleaned Response for {table_name} ===")
+            print(cleaned_response)
+            
+            if cleaned_response.startswith('{') and cleaned_response.endswith('}'):
+                try:
+                    data = json.loads(cleaned_response)
+                    print(f"\n=== Parsed JSON for {table_name} ===")
+                    print(json.dumps(data, indent=2))
+                    
+                    if isinstance(data, dict) and table_name in data:
+                        data = {"rows": data[table_name]}
+                        print(f"\n=== Restructured Data for {table_name} ===")
+                        print(json.dumps(data, indent=2))
+                except json.JSONDecodeError:
+                    print(f"Invalid JSON response for {table_name}: {cleaned_response}")
+                    return None
+            
+            if not data:
+                print(f"Failed to parse response for {table_name}")
                 return None
 
             # Validate and extract rows
@@ -257,12 +276,18 @@ class GeminiProcessor:
                     print(f"Rows is not a list for {table_name}")
                     return None
                 
+                print(f"\n=== Final Rows for {table_name} ===")
+                print(json.dumps(rows, indent=2))
+                
                 # Clean numeric values for each row
                 for row in rows:
                     if not isinstance(row, dict):
                         print(f"Row is not a dictionary for {table_name}")
                         continue
                     self.clean_numeric_values(row)
+                
+                print(f"\n=== Cleaned Numeric Values for {table_name} ===")
+                print(json.dumps(rows, indent=2))
                 return rows
             
             print(f"No rows found in response for {table_name}")
@@ -341,7 +366,11 @@ class CSVWriter:
             if table_name in data and data[table_name]:
                 try:
                     filepath = self.output_dir / filename
+                    print(f"\n=== Writing to {filename} ===")
+                    print(f"Headers: {headers}")
+                    print(f"Data: {json.dumps(data[table_name], indent=2)}")
                     self._write_csv(filepath, headers, data[table_name])
+                    print(f"Successfully wrote data to {filename}")
                 except Exception as e:
                     print(f"Error writing {table_name} to CSV: {str(e)}")
                     continue
