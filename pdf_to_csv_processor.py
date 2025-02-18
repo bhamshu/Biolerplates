@@ -96,6 +96,67 @@ class GeminiProcessor:
         
         return data
     
+    def get_table_data(self, pdf_text: str, table_name: str, schema: str) -> Dict:
+        """Get data for a specific table using targeted prompts."""
+        
+        # Create a focused prompt for each table
+        prompts = {
+            'company_info': """
+                Extract ONLY company information from the text in this exact JSON format:
+                {
+                    "company_id": null,
+                    "company_name": "",
+                    "bse_code": "",
+                    "nse_code": "",
+                    "bloomberg_code": "",
+                    "sector": "",
+                    "market_cap_cr": null,
+                    "enterprise_value_cr": null,
+                    "outstanding_shares_cr": null,
+                    "beta": null,
+                    "face_value_rs": null,
+                    "year_high_price_rs": null,
+                    "year_low_price_rs": null,
+                    "data_source": ""
+                }
+                IMPORTANT: Use null for missing numeric values, not empty strings. Remove commas from numbers.
+            """,
+            'shareholding_pattern': """
+                Extract ONLY shareholding pattern data from the text in this exact JSON format:
+                {
+                    "company_id": null,
+                    "quarter": "",
+                    "promoter_holding_pct": null,
+                    "fii_holding_pct": null,
+                    "mf_insti_holding_pct": null,
+                    "public_holding_pct": null,
+                    "others_holding_pct": null,
+                    "data_source": ""
+                }
+                IMPORTANT: Use null for missing numeric values. Remove commas from numbers.
+            """,
+            # ... similar prompts for other tables ...
+        }
+        
+        try:
+            prompt = prompts.get(table_name, "")
+            if not prompt:
+                raise ValueError(f"No prompt defined for table {table_name}")
+                
+            response = self.model.generate_content(prompt + "\n\nExtract from this text:\n" + pdf_text)
+            print(f"Raw Gemini response for {table_name}:", response.text)
+            
+            try:
+                data = json.loads(response.text)
+                return self.clean_numeric_values(data)
+            except json.JSONDecodeError:
+                print(f"Failed to parse JSON for {table_name}")
+                return None
+                
+        except Exception as e:
+            print(f"Error getting data for {table_name}: {str(e)}")
+            return None
+
     def get_structured_data(self, pdf_text: str) -> Dict:
         prompt = """
         Extract ALL the following information from the given text and return it in this EXACT JSON format.
@@ -284,22 +345,32 @@ class GeminiProcessor:
 class CSVWriter:
     def __init__(self, output_dir: Path):
         self.output_dir = output_dir
-        self.table_configs = {
-            'company_info': ('company_info.csv', ['company_id', 'company_name', 'bse_code', 'nse_code', 'bloomberg_code', 
-                           'sector', 'market_cap_cr', 'enterprise_value_cr', 'outstanding_shares_cr',
-                           'beta', 'face_value_rs', 'year_high_price_rs', 'year_low_price_rs', 'data_source']),
-            'shareholding': ('shareholding_pattern.csv', ['company_id', 'quarter', 'promoter_holding_pct', 'fii_holding_pct',
-                           'mf_insti_holding_pct', 'public_holding_pct', 'others_holding_pct', 'data_source']),
-            'price_performance': ('price_performance.csv', ['company_id', 'period'] + [f for f in ['absolute_return_3m_pct', 
-                                'absolute_return_6m_pct', 'absolute_return_1y_pct', 'sensex_return_3m_pct', 'sensex_return_6m_pct',
-                                'sensex_return_1y_pct', 'relative_return_3m_pct', 'relative_return_6m_pct', 'relative_return_1y_pct',
-                                'data_source']]),
-            'financial_results': ('financial_results.csv', ['financial_id', 'company_id', 'fiscal_period', 'revenue_cr',
-                                'yoy_growth_revenue_pct', 'ebitda_cr', 'ebitda_margin_pct', 'net_profit_cr',
-                                'net_profit_margin_pct', 'eps_rs', 'data_source']),
-            # ... add configurations for other tables
-        }
-    
+        # Load table configurations from schema
+        self.table_configs = self._load_schema_configs()
+        
+    def _load_schema_configs(self) -> Dict:
+        """Load table configurations from schema.ddl"""
+        configs = {}
+        current_table = None
+        columns = []
+        
+        with open('schemas.ddl', 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('CREATE TABLE'):
+                    current_table = line.split()[2].strip('(')
+                    columns = []
+                elif line.startswith(')') and current_table:
+                    filename = f"{current_table}.csv"
+                    configs[current_table] = (filename, columns)
+                    current_table = None
+                elif current_table and line and not line.startswith('--'):
+                    col_name = line.split()[0].strip(',')
+                    if col_name and not col_name.startswith(('PRIMARY', 'CONSTRAINT')):
+                        columns.append(col_name)
+                        
+        return configs
+
     def write_data(self, data: Dict, source_file: str):
         """Write data to all CSV files."""
         for table_name, (filename, headers) in self.table_configs.items():
@@ -332,39 +403,48 @@ class PDFProcessor:
         
     def process_pdf(self, pdf_path: str):
         try:
-            # Extract text from PDF
             pdf_text = self.pdf_extractor.extract_text(pdf_path)
-            print(f"Extracted {len(pdf_text)} characters from PDF")  # Debug print
+            print(f"Extracted {len(pdf_text)} characters from PDF")
             
-            # Get structured data from Gemini
-            structured_data = self.gemini_processor.get_structured_data(pdf_text)
-            
-            # Add source file info
             filename = Path(pdf_path).name
-            structured_data['company_info']['data_source'] = filename
-            structured_data['shareholding']['data_source'] = filename
+            success = True
             
-            # Generate company_id from filename if not present
-            if not structured_data['company_info']['company_id']:
-                # Extract numeric part from filename or generate a random one
-                company_id = hash(filename) % 10000  # Simple hash-based ID
-                structured_data['company_info']['company_id'] = company_id
-                structured_data['shareholding']['company_id'] = company_id
+            # Process each table separately
+            for table_name in self.csv_writer.table_configs.keys():
+                print(f"Processing {table_name}...")
+                
+                # Get data for this table
+                table_data = self.gemini_processor.get_table_data(pdf_text, table_name, 'schemas.ddl')
+                
+                if table_data:
+                    # Add source file and IDs
+                    table_data['data_source'] = filename
+                    if 'company_id' in table_data and not table_data['company_id']:
+                        table_data['company_id'] = hash(filename) % 10000
+                        
+                    # Add specific IDs for tables that need them
+                    id_fields = {
+                        'financial_results': 'financial_id',
+                        'balance_sheet': 'balance_sheet_id',
+                        'cash_flow': 'cash_flow_id',
+                        'key_ratios': 'ratio_id',
+                        'outlook_or_management_discussion': 'discussion_id',
+                        'recommendations_or_targets': 'recommendation_id'
+                    }
+                    
+                    if table_name in id_fields and id_fields[table_name] in table_data:
+                        table_data[id_fields[table_name]] = hash(f"{filename}_{table_name}") % 10000
+                    
+                    # Write to CSV
+                    self.csv_writer.write_data({table_name: table_data}, filename)
+                else:
+                    print(f"No data extracted for {table_name}")
+                    success = False
+                    
+            return success
             
-            # Generate IDs for tables that need them
-            if structured_data['financial_results']:
-                structured_data['financial_results']['financial_id'] = hash(f"{filename}_fr") % 10000
-            if structured_data['balance_sheet']:
-                structured_data['balance_sheet']['balance_sheet_id'] = hash(f"{filename}_bs") % 10000
-            # ... generate other IDs ...
-            
-            # Write all data to CSVs
-            self.csv_writer.write_data(structured_data, filename)
-            
-            return True
         except Exception as e:
             print(f"Error processing PDF {pdf_path}: {str(e)}")
-            print(f"Stack trace:", e.__traceback__)
             return False
 
 def main():
